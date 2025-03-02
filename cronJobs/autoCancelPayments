@@ -1,1 +1,58 @@
+const Payment = require("../models/Payment");
+const Booking = require("../models/Booking");
+const { sendNotification } = require("../controllers/notificationController");
+const sendEmail = require("../utils/emailService"); // Email utility
+
+// ✅ Short-term monitoring: Payment delays (30s) & cancellations (60s)
+const checkPayments = async () => {
+    const now = new Date();
+
+    // Find pending payments older than 30s (send delay notification)
+    const delayedPayments = await Payment.find({ status: "pending", createdAt: { $lte: new Date(now - 30000) } });
+    delayedPayments.forEach(payment => {
+        sendNotification(payment.userId, "Your payment is delayed. Please check your status.");
+    });
+
+    // Find pending payments older than 60s (auto-cancel)
+    const cancelPayments = await Payment.find({ status: "pending", createdAt: { $lte: new Date(now - 60000) } });
+    for (const payment of cancelPayments) {
+        payment.status = "canceled";
+        await payment.save();
+        sendNotification(payment.userId, "Your payment was canceled due to timeout.");
+    }
+};
+
+// ✅ Long-term monitoring: Auto-cancel payments after 10 minutes
+const autoCancelPayments = async () => {
+    try {
+        const expirationTime = new Date(Date.now() - 10 * 60 * 1000); // Payments older than 10 min
+
+        // Find all pending payments older than 10 minutes
+        const expiredPayments = await Payment.find({ status: "pending", createdAt: { $lte: expirationTime } });
+
+        for (const payment of expiredPayments) {
+            payment.status = "failed"; // Mark payment as failed
+            await payment.save();
+
+            // Cancel associated booking
+            await Booking.findByIdAndUpdate(payment.bookingId, { status: "cancelled" });
+
+            // Send cancellation email
+            await sendEmail(payment.userId, "Payment Failed", 
+                `Your payment for booking ID ${payment.bookingId} has been automatically canceled due to timeout.`
+            );
+
+            sendNotification(payment.userId, "Your payment failed and booking was canceled.");
+            console.log(`Auto-canceled payment: ${payment._id}`);
+        }
+    } catch (error) {
+        console.error("Error in auto-canceling payments:", error.message);
+    }
+};
+
+// ✅ Schedule tasks
+setInterval(checkPayments, 10000); // Run every 10 seconds
+setInterval(autoCancelPayments, 600000); // Run every 10 minutes
+
+module.exports = { checkPayments, autoCancelPayments };
 
